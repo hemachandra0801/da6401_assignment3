@@ -5,23 +5,24 @@ import torch
 import torch.nn.functional as F
 
 class TransliterationDataset(Dataset):
-    def __init__(self, devanagari_samples, latin_samples, dev_vocab, latin_vocab):
-        self.devanagari = devanagari_samples
+    def __init__(self, latin_samples, devanagari_samples, latin_vocab, dev_vocab):
         self.latin = latin_samples
-        self.dev_vocab = dev_vocab
+        self.devanagari = devanagari_samples
         self.latin_vocab = latin_vocab
+        self.dev_vocab = dev_vocab
+
+    def __getitem__(self, idx):
+        lat_str = str(self.latin[idx])
+        dev_str = str(self.devanagari[idx])
+        
+        # Input is Latin, target is Devanagari
+        lat_indices = [self.latin_vocab['<SOS>']] + [self.latin_vocab[c] for c in lat_str] + [self.latin_vocab['<EOS>']]
+        dev_indices = [self.dev_vocab['<SOS>']] + [self.dev_vocab[c] for c in dev_str] + [self.dev_vocab['<EOS>']]
+        
+        return torch.tensor(lat_indices, dtype=torch.long), torch.tensor(dev_indices, dtype=torch.long)
 
     def __len__(self):
         return len(self.devanagari)
-
-    def __getitem__(self, idx):
-        dev_str = str(self.devanagari[idx])
-        lat_str = str(self.latin[idx])
-        
-        dev_indices = [self.dev_vocab['<SOS>']] + [self.dev_vocab[c] for c in dev_str] + [self.dev_vocab['<EOS>']]
-        lat_indices = [self.latin_vocab['<SOS>']] + [self.latin_vocab[c] for c in lat_str] + [self.latin_vocab['<EOS>']]
-        
-        return torch.tensor(dev_indices, dtype=torch.long), torch.tensor(lat_indices, dtype=torch.long)
 
 
 def build_vocab(samples):
@@ -32,10 +33,10 @@ def build_vocab(samples):
                 vocab[c] = len(vocab)
     return vocab
 
-def load_data(lang_code="hi", data_dir="dakshina_dataset_v1.0"):
+def load_data(lang_code="hi", data_dir="../input/dakshina/dakshina_dataset_v1.0"):
     base_path = os.path.join(data_dir, lang_code, "lexicons")
     
-    # Load TSV files with proper column order (Devanagari first, then Latin)
+    # Load TSV files with proper column order
     train_df = pd.read_csv(
         os.path.join(base_path, f"{lang_code}.translit.sampled.train.tsv"),
         sep="\t", header=None, names=["devanagari", "latin", "count"], 
@@ -53,36 +54,38 @@ def load_data(lang_code="hi", data_dir="dakshina_dataset_v1.0"):
     )
 
     # Build vocabularies
-    char_to_idx_devanagari = build_vocab(train_df["devanagari"].tolist())
     char_to_idx_latin = build_vocab(train_df["latin"].tolist())
+    char_to_idx_devanagari = build_vocab(train_df["devanagari"].tolist())
 
     # Create datasets
     train_dataset = TransliterationDataset(
-        train_df["devanagari"].tolist(),
         train_df["latin"].tolist(),
+        train_df["devanagari"].tolist(),
+        char_to_idx_latin,
         char_to_idx_devanagari,
-        char_to_idx_latin
     )
     dev_dataset = TransliterationDataset(
-        dev_df["devanagari"].tolist(),
         dev_df["latin"].tolist(),
+        dev_df["devanagari"].tolist(),
+        char_to_idx_latin,
         char_to_idx_devanagari,
-        char_to_idx_latin
     )
     test_dataset = TransliterationDataset(
-        test_df["devanagari"].tolist(),
         test_df["latin"].tolist(),
+        test_df["devanagari"].tolist(),
+        char_to_idx_latin,
         char_to_idx_devanagari,
-        char_to_idx_latin
     )
 
     return train_dataset, dev_dataset, test_dataset, char_to_idx_devanagari, char_to_idx_latin
 
 def collate_fn(batch):
-    dev_batch, lat_batch = zip(*batch)
-    dev_padded = torch.nn.utils.rnn.pad_sequence(dev_batch, batch_first=True, padding_value=0)
+    lat_batch, dev_batch = zip(*batch)
     lat_padded = torch.nn.utils.rnn.pad_sequence(lat_batch, batch_first=True, padding_value=0)
-    return dev_padded, lat_padded
+    dev_padded = torch.nn.utils.rnn.pad_sequence(dev_batch, batch_first=True, padding_value=0)
+    return lat_padded, dev_padded
+   
+   
 
 def get_data_loaders(batch_size=32, lang_code="hi"):
     train_dataset, dev_dataset, test_dataset, char_to_idx_devanagari, char_to_idx_latin = load_data(lang_code)
@@ -99,12 +102,12 @@ def get_data_loaders(batch_size=32, lang_code="hi"):
     
     return train_loader, dev_loader, test_loader, char_to_idx_devanagari, char_to_idx_latin
 
-def print_samples(loader, num_samples=5, dev_vocab=None, lat_vocab=None):
+def print_samples(loader, num_samples=5, lat_vocab=None, dev_vocab=None):
     idx_to_dev = {v: k for k, v in dev_vocab.items()}
     idx_to_lat = {v: k for k, v in lat_vocab.items()}
     
     print("\nSample pairs from dataset (Devanagari → Latin):")
-    for i, (dev_batch, lat_batch) in enumerate(loader):
+    for i, (lat_batch, dev_batch) in enumerate(loader):
         if i >= num_samples:
             break
             
@@ -116,19 +119,19 @@ def print_samples(loader, num_samples=5, dev_vocab=None, lat_vocab=None):
         dev_str = ''.join([idx_to_dev.get(idx, '?') for idx in dev_seq if idx not in {0, 1, 2}])
         lat_str = ''.join([idx_to_lat.get(idx, '?') for idx in lat_seq if idx not in {0, 1, 2}])
         
-        print(f"{dev_str} -> {lat_str}")
+        print(f"{lat_str} -> {dev_str}")
 
-if __name__ == "__main__":
-    train_loader, dev_loader, test_loader, char_to_idx_devanagari, char_to_idx_latin = get_data_loaders()
 
-    print(f"Devanagari vocab size: {len(char_to_idx_devanagari)}")
-    print(f"Latin vocab size: {len(char_to_idx_latin)}")
+train_loader, dev_loader, test_loader, char_to_idx_devanagari, char_to_idx_latin = get_data_loaders()
 
-    # Print sample pairs
-    print_samples(train_loader, 5, char_to_idx_devanagari, char_to_idx_latin)
+print(f"Devanagari vocab size: {len(char_to_idx_devanagari)}")
+print(f"Latin vocab size: {len(char_to_idx_latin)}")
 
-    # Example batch
-    devanagari_batch, latin_batch = next(iter(train_loader))
-    print(f"\nBatch shapes:")
-    print(f"Devanagari: {devanagari_batch.shape}")  # (batch_size, max_seq_len)
-    print(f"Latin: {latin_batch.shape}")
+# Print sample pairs
+print_samples(train_loader, 5, char_to_idx_latin, char_to_idx_devanagari)
+
+# Example batch
+devanagari_batch, latin_batch = next(iter(train_loader))
+print(f"\nBatch shapes:")
+print(f"Devanagari: {devanagari_batch.shape}")  # (batch_size, max_seq_len)
+print(f"Latin: {latin_batch.shape}")
